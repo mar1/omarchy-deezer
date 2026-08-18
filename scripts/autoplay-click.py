@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import socket
 import struct
 import subprocess
@@ -50,6 +51,14 @@ CDP_PORT = 9331
 CDP_STARTUP_TIMEOUT_S = 20
 CLICK_RETRY_TIMEOUT_S = 8
 ROW_SEARCH_TIMEOUT_S = 25
+
+# Every Electron app's bundle is named app.asar, so "app.asar" alone matches
+# any of them -- pkill/CDP-target-selection on that substring alone risks
+# hitting an unrelated Electron app that happens to be running at the same
+# time (killing it, or navigating/clicking inside *its* window instead of
+# deezer-desktop's). deezer-desktop's own executable name is distinctive
+# enough to require in addition to app.asar wherever either check happens.
+DEEZER_PROCESS_MARKER = "deezer-desktop"
 
 # The primary Play action's data-testid per content type, read straight off
 # a live DOM dump for each page kind rather than guessed. Each CSS attribute
@@ -271,19 +280,58 @@ def expected_path_from_url(url):
     return path or "/"
 
 
+def _is_deezer_target(target):
+    # Port 9331 is just whatever's currently listening there -- some other
+    # Electron/Chromium app started with the same --remote-debugging-port
+    # (or a port-forwarded/proxied one) would look identical over CDP
+    # otherwise. deezer-desktop's own page always carries "deezer" in its
+    # target url (e.g. the deezer.com origin it loads) or window title, so
+    # require that before trusting a target enough to inject JS into it.
+    url = (target.get("url") or "").lower()
+    title = (target.get("title") or "").lower()
+    return "deezer" in url or "deezer" in title
+
+
 def cdp_reachable():
     try:
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{CDP_PORT}/json", timeout=1) as resp:
-            json.loads(resp.read())
-        return True
+            targets = json.loads(resp.read())
+        return any(_is_deezer_target(t) for t in targets)
     except (urllib.error.URLError, ConnectionError, json.JSONDecodeError, OSError):
         return False
 
 
+def _deezer_desktop_pids():
+    # pkill/pgrep -f "app.asar" alone would match *any* Electron app -- that
+    # bundle filename is generic to Electron itself, not specific to
+    # deezer-desktop. Require deezer-desktop's own executable name in the
+    # full command line too, so an unrelated Electron/Chromium app that
+    # happens to be running never gets targeted.
+    try:
+        out = subprocess.run(["pgrep", "-f", "app.asar"],
+                              capture_output=True, text=True)
+    except OSError:
+        return []
+    pids = []
+    for token in out.stdout.split():
+        try:
+            pid = int(token)
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline = f.read()
+        except (ValueError, OSError):
+            continue
+        if DEEZER_PROCESS_MARKER.encode() in cmdline:
+            pids.append(pid)
+    return pids
+
+
 def relaunch_cold(url):
-    subprocess.run(["pkill", "-f", "app.asar"], stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL)
+    for pid in _deezer_desktop_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     time.sleep(0.6)
     # --start-in-tray comes from this Arch build's own patch set
     # (aunetx/deezer-linux's 01-start-in-tray.patch, applied at package
@@ -332,7 +380,9 @@ def wait_for_page_target():
                     f"http://127.0.0.1:{CDP_PORT}/json", timeout=1) as resp:
                 targets = json.loads(resp.read())
             for target in targets:
-                if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
+                if (target.get("type") == "page"
+                        and target.get("webSocketDebuggerUrl")
+                        and _is_deezer_target(target)):
                     return target["webSocketDebuggerUrl"]
         except (urllib.error.URLError, ConnectionError, json.JSONDecodeError):
             pass
