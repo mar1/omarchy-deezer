@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.mar1dev.omarchy-deezer",
+  "name": "Deezer",
+  "version": "1.0.0",
+  "author": "mar1dev",
+  "license": "MIT",
+  "description": "Deezer in the Omarchy bar: MPRIS playback controls plus playlists, favorites, and search from the Deezer catalog. Requires the deezer-linux Flatpak (dev.aunetx.deezer) running in the background.",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "panel"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Deezer",
+    "description": "Deezer in the Omarchy bar: MPRIS playback controls plus playlists, favorites, and search from the Deezer catalog.",
+    "category": "Media",
+    "aliases": [
+      "deezer",
+      "music",
+      "player"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "showMiniPlayer": "On",
+      "showTrackTitle": "On",
+      "showArtistName": "Off",
+      "scrollBarText": "Off",
+      "scrollSpeed": "1"
+    },
+    "schema": [
+      {
+        "key": "showMiniPlayer",
+        "type": "enum",
+        "label": "Open mini-player from bar",
+        "options": ["On", "Off"],
+        "defaultValue": "On",
+        "description": "When off, clicking the Deezer bar icon opens the full player directly."
+      },
+      {
+        "key": "showTrackTitle",
+        "type": "enum",
+        "label": "Show track title in bar",
+        "options": ["On", "Off"],
+        "defaultValue": "On"
+      },
+      {
+        "key": "showArtistName",
+        "type": "enum",
+        "label": "Show artist name in bar",
+        "options": ["On", "Off"],
+        "defaultValue": "Off"
+      },
+      {
+        "key": "scrollBarText",
+        "type": "enum",
+        "label": "Scroll long bar text",
+        "options": ["On", "Off"],
+        "defaultValue": "Off"
+      },
+      {
+        "key": "scrollSpeed",
+        "type": "string",
+        "label": "Bar text scroll speed",
+        "defaultValue": "1",
+        "description": "Multiplier from 0.25 to 3.00. The default speed is 1."
+      }
+    ]
+  }
+}
