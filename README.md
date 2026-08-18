@@ -23,7 +23,7 @@ supported by Deezer S.A.**
 ## Install
 
 ```
-omarchy plugin add https://github.com/mar1dev/omarchy-deezer.git --enable
+omarchy plugin add https://github.com/mar1/omarchy-deezer.git --enable
 ```
 
 ## Setup

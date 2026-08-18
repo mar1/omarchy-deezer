@@ -20,7 +20,7 @@ Item {
   property var pluginRegistry: null
 
   readonly property string pluginId: manifest && manifest.id
-    ? String(manifest.id) : "io.github.mar1dev.omarchy-deezer"
+    ? String(manifest.id) : "io.github.mar1.omarchy-deezer"
   readonly property string pluginDir: manifest && manifest.__sourceDir
     ? String(manifest.__sourceDir) : ""
 

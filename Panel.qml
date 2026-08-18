@@ -20,7 +20,7 @@ Item {
   property string pendingArtistLink: ""
 
   readonly property string pluginId: manifest && manifest.id
-    ? String(manifest.id) : "io.github.mar1dev.omarchy-deezer"
+    ? String(manifest.id) : "io.github.mar1.omarchy-deezer"
   readonly property color foreground: Color.foreground
   readonly property color background: Color.background
   readonly property color accent: Color.accent

@@ -9,7 +9,7 @@ import "DeezerApi.js" as Api
 BarWidget {
   id: root
 
-  moduleName: "io.github.mar1dev.omarchy-deezer"
+  moduleName: "io.github.mar1.omarchy-deezer"
 
   readonly property var deezer: bar && bar.shell
     ? bar.shell.serviceFor(moduleName) : null

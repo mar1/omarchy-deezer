@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.mar1dev.omarchy-deezer",
+  "id": "io.github.mar1.omarchy-deezer",
   "name": "Deezer",
   "version": "1.0.0",
-  "author": "mar1dev",
+  "author": "mar1",
   "license": "MIT",
   "description": "Deezer in the Omarchy bar: MPRIS playback controls plus playlists, favorites, and search from the Deezer catalog. Requires the deezer-linux Flatpak (dev.aunetx.deezer) running in the background.",
   "kinds": [
