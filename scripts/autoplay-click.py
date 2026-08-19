@@ -45,6 +45,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 CDP_PORT = 9331
@@ -284,12 +285,21 @@ def _is_deezer_target(target):
     # Port 9331 is just whatever's currently listening there -- some other
     # Electron/Chromium app started with the same --remote-debugging-port
     # (or a port-forwarded/proxied one) would look identical over CDP
-    # otherwise. deezer-desktop's own page always carries "deezer" in its
-    # target url (e.g. the deezer.com origin it loads) or window title, so
-    # require that before trusting a target enough to inject JS into it.
-    url = (target.get("url") or "").lower()
-    title = (target.get("title") or "").lower()
-    return "deezer" in url or "deezer" in title
+    # otherwise. A loose "deezer" substring anywhere in the target's url or
+    # title is not enough to trust it: an unrelated app's page could easily
+    # carry that substring incidentally (a tab titled "Deezer" in a browser,
+    # a URL with "deezer" in a query string, etc.), which would still let
+    # navigation/click/Runtime.evaluate run against a page that isn't
+    # deezer-desktop at all. Require the target's actual URL to be on the
+    # deezer.com origin -- not merely a URL/title that happens to mention
+    # "deezer". Before deezer-desktop's own first navigation its page target
+    # briefly sits at about:blank; that's deliberately treated as *not* a
+    # match here, so the polling loops in cdp_reachable/wait_for_page_target
+    # just keep waiting until the real navigation lands instead of trusting
+    # an unnavigated page prematurely.
+    url = target.get("url") or ""
+    host = urllib.parse.urlparse(url).hostname or ""
+    return host == "deezer.com" or host.endswith(".deezer.com")
 
 
 def cdp_reachable():
