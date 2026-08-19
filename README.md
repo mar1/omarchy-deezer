@@ -26,6 +26,28 @@ supported by Deezer S.A.**
 omarchy plugin add https://github.com/mar1/omarchy-deezer.git --enable
 ```
 
+## Remove
+
+```
+omarchy plugin remove io.github.mar1.omarchy-deezer
+```
+
+This removes the plugin's bar widget and panel and stops the MPRIS service it ran, but
+`deezer-linux` itself and your saved access token are untouched (they aren't installed or
+written by the plugin's removal path). To clean those up too:
+
+- **Sign out first, if you can**: open the full player and use its sign-out action before
+  removing the plugin -- this clears the access token from the GNOME Keyring the same way
+  `AuthManager.qml`'s `clearStoredToken()` does.
+- **Already removed the plugin?** Clear the leftover keyring entry directly:
+  ```
+  secret-tool clear service quickshell-deezer kind access-token app-id deezer
+  ```
+- **Uninstall `deezer-linux`** (optional -- only if you don't use it outside this plugin):
+  ```
+  flatpak uninstall dev.aunetx.deezer
+  ```
+
 ## Setup
 
 1. Start `deezer-linux` (or `deezer-desktop --ozone-platform-hint=auto`) and log in there as you
