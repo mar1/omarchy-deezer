@@ -296,24 +296,40 @@ Item {
     advanceQueue()
   }
 
+  // Looked up by id rather than plain Array.indexOf(track) -- the clicked
+  // item comes from a ListView delegate's modelData, which is only
+  // guaranteed structurally equal to whatever's in these lists right now,
+  // not necessarily the exact same object reference indexOf's strict
+  // equality needs. A reference mismatch there silently returned -1 and
+  // dropped the click entirely (playFromQueue's own startIndex < 0 guard),
+  // with nothing to show for it -- no error, no process spawned.
+  function indexOfTrackId(list, track) {
+    if (!track) return -1
+    var id = String(track.id)
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].id) === id) return i
+    }
+    return -1
+  }
+
   function openPlaylistTrack(track) {
     if (!track) return
-    playFromQueue(playlistTracks, playlistTracks.indexOf(track))
+    playFromQueue(playlistTracks, indexOfTrackId(playlistTracks, track))
   }
 
   function openFavoriteTrack(track) {
     if (!track) return
-    playFromQueue(favoriteTracks, favoriteTracks.indexOf(track))
+    playFromQueue(favoriteTracks, indexOfTrackId(favoriteTracks, track))
   }
 
   function openArtistTrack(track) {
     if (!track) return
-    playFromQueue(artistTopTracks, artistTopTracks.indexOf(track))
+    playFromQueue(artistTopTracks, indexOfTrackId(artistTopTracks, track))
   }
 
   function openAlbumTrack(track) {
     if (!track) return
-    playFromQueue(albumTracks, albumTracks.indexOf(track))
+    playFromQueue(albumTracks, indexOfTrackId(albumTracks, track))
   }
 
   function runAutoplayClick(link) {
