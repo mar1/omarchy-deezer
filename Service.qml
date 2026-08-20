@@ -270,6 +270,17 @@ Item {
   // below), not the track ending.
   readonly property int minTrackElapsedMs: 3000
 
+  // Loose title match (case/whitespace-insensitive) used to tell a same-
+  // song catalog-id redirect apart from a genuinely different track
+  // loading this fast -- e.g. an unavailable/region-locked track falling
+  // back to something unrelated, which should NOT be adopted as "this is
+  // just our track under a different id".
+  function looksLikeSameTrack(a, b) {
+    var norm = function(s) { return String(s || "").trim().toLowerCase() }
+    a = norm(a); b = norm(b)
+    return a.length > 0 && a === b
+  }
+
   function clearQueue() {
     playQueue = []
     playQueueExpectedId = ""
@@ -307,7 +318,8 @@ Item {
     // track change; wait for the next one instead of treating a gap as
     // evidence of anything.
     if (currentTrackId === "") return
-    if (Date.now() - playQueueLaunchedAt < minTrackElapsedMs) {
+    if (Date.now() - playQueueLaunchedAt < minTrackElapsedMs
+        && looksLikeSameTrack(title, playQueue[0].name)) {
       // Too soon to be the track actually ending -- confirmed live:
       // Deezer sometimes settles the id we asked for to a different
       // canonical id for the very same song (duplicate catalog entries
@@ -315,7 +327,11 @@ Item {
       // like "it ended, advance" before this guard existed and skipped an
       // extra track ahead despite the requested one playing correctly.
       // Adopt whatever id it actually settled on instead of assuming
-      // anything ended.
+      // anything ended. The title check keeps this from also swallowing a
+      // genuinely different track that happened to load this fast (an
+      // unavailable/region-locked track falling back to something
+      // unrelated) -- that's not this queue's next track either, so it
+      // falls through to the "never confirmed" branch below instead.
       playQueueExpectedId = currentTrackId
       playQueueConfirmed = true
       return
