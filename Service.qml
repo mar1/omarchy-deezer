@@ -235,33 +235,92 @@ Item {
   // than opening deezer-desktop already did on its own.
   function openInDeezer(item) {
     if (!item || !item.link) return
-    runAutoplayClick(item.link, "")
+    clearQueue()
+    runAutoplayClick(item.link)
   }
 
   // Playing a track by opening its own standalone page starts a Deezer
-  // "track mix" queue around it -- confirmed live, the track after it was
-  // Deezer's algorithmic pick, not the next one in the playlist/library it
-  // came from. Playing it from *within* that context page instead (its own
-  // per-row Play button) keeps the context itself as the queue. See
-  // scripts/autoplay-click.py for how the row is matched.
-  function openPlaylistTrack(track) {
-    if (!track || !selectedPlaylist || !selectedPlaylist.link) return
-    runAutoplayClick(selectedPlaylist.link, track.name)
+  // "track mix" queue around it instead of continuing into whatever
+  // playlist/library it came from -- confirmed live, the track after it was
+  // Deezer's own algorithmic pick, not the next one in that context. An
+  // earlier version worked around that by clicking the track's own row
+  // *within* the context page instead, keeping the context itself as the
+  // queue -- abandoned because deezer-desktop's virtualized row list never
+  // mounts a row beyond whatever handful were already there on load while
+  // its window stays hidden (--start-in-tray), which scrolling by any means
+  // couldn't work around (see scripts/autoplay-click.py's own docstring).
+  //
+  // playQueue/advanceQueue below reimplement that continuity ourselves
+  // instead: play each track by its own simple, reliable page (same as
+  // openInDeezer), and when MPRIS reports it's moved on to something we
+  // didn't ask for, immediately override with the *actual* next track in
+  // our own list.
+  property var playQueue: []
+  property string playQueueExpectedId: ""
+
+  function clearQueue() {
+    playQueue = []
+    playQueueExpectedId = ""
   }
 
-  readonly property string lovedTracksLink: "https://www.deezer.com/profile/me/loved"
+  function playFromQueue(tracks, startIndex) {
+    if (startIndex < 0) { clearQueue(); return }
+    playQueue = tracks.slice(startIndex)
+    advanceQueue()
+  }
+
+  function advanceQueue() {
+    if (!playQueue.length) { playQueueExpectedId = ""; return }
+    var track = playQueue[0]
+    playQueueExpectedId = String(track.id)
+    runAutoplayClick(track.link)
+  }
+
+  // Fires on every MPRIS track change, including the one where our own
+  // click above lands (currentTrackId becomes playQueueExpectedId -- the
+  // "nothing to do" case below). It's only the *next* change after that --
+  // the queued track ending, on to Deezer's own algorithmic pick -- that
+  // this needs to catch and override.
+  onCurrentTrackIdChanged: {
+    if (!playQueue.length) return
+    if (currentTrackId === playQueueExpectedId) return
+    if (String(playQueue[0].id) !== playQueueExpectedId) {
+      // The track we last queued was never actually confirmed playing (the
+      // click is still in flight, failed outright, or something unrelated
+      // took over in the meantime) -- don't guess, just stop trying to
+      // steer whatever's happening now.
+      clearQueue()
+      return
+    }
+    playQueue.shift()
+    advanceQueue()
+  }
+
+  function openPlaylistTrack(track) {
+    if (!track) return
+    playFromQueue(playlistTracks, playlistTracks.indexOf(track))
+  }
 
   function openFavoriteTrack(track) {
     if (!track) return
-    runAutoplayClick(lovedTracksLink, track.name)
+    playFromQueue(favoriteTracks, favoriteTracks.indexOf(track))
   }
 
-  function runAutoplayClick(link, trackTitle) {
+  function openArtistTrack(track) {
+    if (!track) return
+    playFromQueue(artistTopTracks, artistTopTracks.indexOf(track))
+  }
+
+  function openAlbumTrack(track) {
+    if (!track) return
+    playFromQueue(albumTracks, albumTracks.indexOf(track))
+  }
+
+  function runAutoplayClick(link) {
     var url = link.indexOf("https://") === 0
       ? "deezer://" + link.slice("https://".length)
       : link
     var args = ["python3", pluginDir + "/scripts/autoplay-click.py", url]
-    if (trackTitle) args.push(trackTitle)
     // A click while a previous one is still mid-relaunch would otherwise be
     // silently dropped (setting `running` true again while already true is
     // a no-op) -- always honor the latest click instead.
@@ -529,14 +588,6 @@ Item {
       })
   }
 
-  // Same context-preserving trick as openPlaylistTrack: playing a top track
-  // by opening its own standalone page would start a track_mix instead of
-  // continuing through the artist's other top tracks.
-  function openArtistTrack(track) {
-    if (!track || !selectedArtist || !selectedArtist.link) return
-    runAutoplayClick(selectedArtist.link, track.name)
-  }
-
   function closeArtistDetail() {
     selectedArtist = null
     artistTopTracks = []
@@ -564,11 +615,6 @@ Item {
         if (!ok) { root.fail(error); return }
         root.albumTracks = Api.normalizePage(payload).items
       })
-  }
-
-  function openAlbumTrack(track) {
-    if (!track || !selectedAlbum || !selectedAlbum.link) return
-    runAutoplayClick(selectedAlbum.link, track.name)
   }
 
   function closeAlbumDetail() {

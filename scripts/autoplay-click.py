@@ -29,6 +29,22 @@ effect of that, popping the window up on every single click regardless of
 hash directly reaches the same client-side router without going through
 that handler at all, confirmed live to leave the window untouched.
 
+Always targets a single item's own page (a track, playlist, album, or
+artist) and clicks that page's own top-level Play button -- never a
+specific row inside a longer list. An earlier version also supported
+clicking a named track's row within a playlist/loved-tracks context page,
+to start playback with that context (rather than a track_mix) as the
+queue; that depended on deezer-desktop's virtualized row list mounting rows
+for whatever wasn't already rendered on load, which never actually
+happened -- confirmed live, deezer-desktop runs with --start-in-tray so its
+window is never shown, and Chromium suspends layout/paint work (which
+row virtualization depends on) for an occluded window, so scrolling by any
+means never revealed a row beyond the initial handful. Service.qml now
+handles context/queue continuation itself instead, by watching MPRIS for
+when a queued track ends and launching the next one in its own list with
+another call to this script, rather than depending on deezer-desktop's own
+in-app queue at all.
+
 Usage: autoplay-click.py <deezer://...-or-https://... url>
 Exit 0 if the click landed, 1 otherwise. Always best-effort -- callers
 should not treat a nonzero exit as more than "didn't work this time".
@@ -51,7 +67,6 @@ import urllib.request
 CDP_PORT = 9331
 CDP_STARTUP_TIMEOUT_S = 20
 CLICK_RETRY_TIMEOUT_S = 8
-ROW_SEARCH_TIMEOUT_S = 25
 
 # Every Electron app's bundle is named app.asar, so "app.asar" alone matches
 # any of them -- pkill/CDP-target-selection on that substring alone risks
@@ -78,17 +93,6 @@ PLAY_BUTTON_SELECTOR = ",".join([
 ])
 
 
-def path_match_source(expected_path):
-    # Deezer silently resolves a "me" path segment to the real numeric user
-    # id in some routes -- confirmed live: navigating to
-    # "/profile/me/loved" leaves the hash as "/profile/493227/loved" a
-    # moment later, which a plain substring check against "/profile/me/..."
-    # would then never match again. Treat "me" as a wildcard so the match
-    # still holds after that swap.
-    segments = expected_path.strip("/").split("/")
-    return "/".join(re.escape(s) if s != "me" else "[^/]+" for s in segments)
-
-
 def _play_button_probe(expected_path, click):
     # The click can land before the SPA has actually finished routing to the
     # requested item -- verified live: an early click just hit whatever
@@ -104,7 +108,7 @@ def _play_button_probe(expected_path, click):
     # testing. `click=False` lets the caller confirm readiness on a couple
     # of consecutive polls (letting hydration catch up) before a `click=True`
     # call actually presses it for real.
-    path_pattern = json.dumps(path_match_source(expected_path))
+    path_pattern = json.dumps(re.escape(expected_path))
     action = "el.click(); return true;" if click else "return true;"
     return f"""
     (function() {{
@@ -122,159 +126,6 @@ def _play_button_probe(expected_path, click):
       {action}
     }})()
     """
-
-
-def _track_row_probe(expected_path, track_title, click):
-    # Clicking a track's own standalone page starts a "track mix" -- a
-    # Deezer radio queue around that one song (hence the button's own
-    # testid, track_mix-play-button) -- instead of continuing into whatever
-    # played it (a playlist, the loved-tracks library): confirmed live, the
-    # track after it was Deezer's algorithmic pick, not the next one in
-    # context. Playing the row's own per-track button *within* that
-    # context page instead keeps the context as the queue, so playback
-    # continues into it normally once the track ends.
-    #
-    # Rows carry no stable track-id attribute anywhere in their DOM
-    # (checked live) -- only aria-rowindex (position, not identity) and
-    # hashed CSS module classes. The one durable anchor is each row's
-    # data-testid="title" span, whose text is the literal, unlocalized
-    # song title, so rows are matched by that instead. Its own play button
-    # is the first <button> in the row's DOM order (checked live across
-    # playlist and loved-tracks pages).
-    # Long playlists/libraries are virtualized -- checked live, a 41-track
-    # playlist only ever had ~24 rows in the DOM at once, so a track sorted
-    # near the top of *our* panel (by time_add) but sitting near the bottom
-    # of the app's own native order was never found. When no row matches
-    # among what's currently rendered, scroll and let the next poll re-check
-    # rather than giving up -- the interval between polls is what gives the
-    # virtualized renderer time to mount the newly-revealed rows.
-    path_pattern = json.dumps(path_match_source(expected_path))
-    title_json = json.dumps(track_title)
-    action = "btn.click(); return true;" if click else "return true;"
-    return f"""
-    (function() {{
-      if (!new RegExp({path_pattern}).test(location.hash)) return false;
-      var titles = Array.prototype.slice.call(
-        document.querySelectorAll('[data-testid="title"]'));
-      var target = {title_json};
-      // Album pages number each title ("5. Strategy") where playlist and
-      // loved-tracks rows don't -- strip a leading "N. " before comparing
-      // so the same match works on both.
-      var stripNumber = function(s) {{ return s.replace(/^\\d+\\.\\s*/, ""); }};
-      for (var i = 0; i < titles.length; i++) {{
-        if (stripNumber(titles[i].textContent.trim()) !== target) continue;
-        var row = titles[i];
-        while (row && row.getAttribute("role") !== "row") row = row.parentElement;
-        if (!row) continue;
-        var btn = row.querySelector("button");
-        if (!btn) continue;
-        {action}
-      }}
-      var scroller = document.scrollingElement || document.documentElement;
-      if (scroller && scroller.scrollHeight > scroller.clientHeight) {{
-        var atBottom = scroller.scrollTop + scroller.clientHeight
-          >= scroller.scrollHeight - 4;
-        scroller.scrollTop = atBottom ? 0
-          : scroller.scrollTop + scroller.clientHeight * 0.8;
-      }}
-      return false;
-    }})()
-    """
-
-
-# The "Added" column header, across the same handful of locales as the
-# retired label-matching Play-button lookup. Sorting a playlist/library page
-# by it (descending) puts the item our own panel already shows first --
-# most recently added -- at the top of the app's own rendering too, which
-# is what actually solves the virtualization problem below: a track that's
-# first in *our* order no longer needs scrolling through however many
-# hundred rows separate it from wherever the app's default ordering put it.
-# Confirmed live against a 138-track playlist: one click reordered it to
-# exactly the order our own time_add sort already produces.
-ADDED_COLUMN_WORDS = [
-    "added", "ajouté", "hinzugefügt", "añadido", "aggiunto",
-    "adicionado", "toegevoegd",
-]
-
-
-def _sort_header_probe(expected_path):
-    path_pattern = json.dumps(path_match_source(expected_path))
-    words_json = json.dumps(ADDED_COLUMN_WORDS)
-    return f"""
-    (function() {{
-      if (!new RegExp({path_pattern}).test(location.hash)) return false;
-      var words = {words_json};
-      var headers = Array.prototype.slice.call(
-        document.querySelectorAll('[role="columnheader"]'));
-      for (var i = 0; i < headers.length; i++) {{
-        var label = (headers[i].innerText || headers[i].textContent || '')
-          .trim().toLowerCase();
-        if (words.indexOf(label) === -1) continue;
-        var btn = headers[i].querySelector("button");
-        if (!btn) continue;
-        btn.click();
-        // The scroll position from a previous visit persists across an
-        // in-app hash navigation (checked live) -- reset it so the row
-        // search below starts scanning from the freshly-resorted top.
-        var scroller = document.scrollingElement || document.documentElement;
-        if (scroller) scroller.scrollTop = 0;
-        return true;
-      }}
-      return false;
-    }})()
-    """
-
-
-def _title_at_top_probe(track_title):
-    # Whether the target is already among the currently-rendered rows with
-    # the list scrolled to the very top -- i.e. whether the sort is already
-    # the one we want, without side effects (no click, no scrolling past
-    # what's already visible).
-    title_json = json.dumps(track_title)
-    return f"""
-    (function() {{
-      var scroller = document.scrollingElement || document.documentElement;
-      if (scroller) scroller.scrollTop = 0;
-      var titles = Array.prototype.slice.call(
-        document.querySelectorAll('[data-testid="title"]'));
-      var stripNumber = function(s) {{ return s.replace(/^\\d+\\.\\s*/, ""); }};
-      for (var i = 0; i < titles.length; i++)
-        if (stripNumber(titles[i].textContent.trim()) === {title_json}) return true;
-      return false;
-    }})()
-    """
-
-
-def presort_by_added(sock, expected_path, track_title, timeout=8):
-    # The header is a bare ascending/descending toggle, not an idempotent
-    # "sort descending" action -- clicking it unconditionally risked
-    # flipping an already-correctly-sorted page (e.g. left that way by an
-    # earlier run against the same long-lived deezer-desktop instance) to
-    # the wrong order instead, confirmed live as the exact reason a retry
-    # against the same session intermittently failed where the first
-    # attempt had succeeded. Check first; only toggle if the target isn't
-    # already visible at the top, and confirm it actually worked afterward.
-    #
-    # Best-effort and non-fatal throughout: some context pages (e.g. an
-    # artist's own page) have no such column at all, in which case this
-    # just leaves the row search below to fall back on scrolling through
-    # whatever order is already there.
-    check_expr = _title_at_top_probe(track_title)
-    sort_expr = _sort_header_probe(expected_path)
-    deadline = time.monotonic() + timeout
-    msg_id = 90000
-    attempts = 0
-    while time.monotonic() < deadline and attempts < 2:
-        msg_id += 1
-        if evaluate(sock, msg_id, check_expr) is True:
-            return True
-        msg_id += 1
-        if evaluate(sock, msg_id, sort_expr) is not True:
-            return False  # no such column on this page -- nothing to toggle
-        attempts += 1
-        time.sleep(0.6)
-    msg_id += 1
-    return evaluate(sock, msg_id, check_expr) is True
 
 
 def expected_path_from_url(url):
@@ -581,19 +432,10 @@ def evaluate(sock, msg_id, expression, timeout=2):
     return None
 
 
-def try_click(sock, expected_path, track_title=None):
-    if track_title:
-        presort_by_added(sock, expected_path, track_title)
-        ready_expr = _track_row_probe(expected_path, track_title, click=False)
-        click_expr = _track_row_probe(expected_path, track_title, click=True)
-        # Finding a row can mean several scroll-and-recheck cycles through a
-        # long, virtualized list, unlike the fixed top-of-page Play button.
-        timeout = ROW_SEARCH_TIMEOUT_S
-    else:
-        ready_expr = _play_button_probe(expected_path, click=False)
-        click_expr = _play_button_probe(expected_path, click=True)
-        timeout = CLICK_RETRY_TIMEOUT_S
-    deadline = time.monotonic() + timeout
+def try_click(sock, expected_path):
+    ready_expr = _play_button_probe(expected_path, click=False)
+    click_expr = _play_button_probe(expected_path, click=True)
+    deadline = time.monotonic() + CLICK_RETRY_TIMEOUT_S
     msg_id = 0
     consecutive_ready = 0
     while time.monotonic() < deadline:
@@ -612,15 +454,10 @@ def try_click(sock, expected_path, track_title=None):
 
 
 def main():
-    if len(sys.argv) not in (2, 3):
-        print("usage: autoplay-click.py <url> [track-title]", file=sys.stderr)
+    if len(sys.argv) != 2:
+        print("usage: autoplay-click.py <url>", file=sys.stderr)
         return 2
     url = sys.argv[1]
-    # An optional track title switches from "click this page's own Play
-    # button" to "click this specific track's row within the page" -- pass
-    # a playlist/loved-tracks context URL with the track's title to start
-    # it with that context as the playback queue instead of a track_mix.
-    track_title = sys.argv[2] if len(sys.argv) == 3 else None
     expected_path = expected_path_from_url(url)
     warm = cdp_reachable()
     if not warm:
@@ -632,7 +469,7 @@ def main():
     try:
         if warm:
             navigate_via_cdp(sock, expected_path)
-        return 0 if try_click(sock, expected_path, track_title) else 1
+        return 0 if try_click(sock, expected_path) else 1
     finally:
         sock.close()
 
