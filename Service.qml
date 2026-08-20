@@ -257,10 +257,23 @@ Item {
   // our own list.
   property var playQueue: []
   property string playQueueExpectedId: ""
+  // Whether currentTrackId has ever matched (or been adopted as, see
+  // below) what we're currently waiting on -- distinguishes "never
+  // actually confirmed playing" (a click still in flight, failed outright)
+  // from a genuine advance below.
+  property bool playQueueConfirmed: false
+  property double playQueueLaunchedAt: 0
+  // A real "this track finished" MPRIS change never arrives less than a
+  // few seconds after launching it -- even the shortest real songs run
+  // longer than this. Below this threshold, a currentTrackId that doesn't
+  // match what was asked for is a catalog id redirect settling (see
+  // below), not the track ending.
+  readonly property int minTrackElapsedMs: 3000
 
   function clearQueue() {
     playQueue = []
     playQueueExpectedId = ""
+    playQueueConfirmed = false
   }
 
   function playFromQueue(tracks, startIndex) {
@@ -270,25 +283,48 @@ Item {
   }
 
   function advanceQueue() {
-    if (!playQueue.length) { playQueueExpectedId = ""; return }
+    if (!playQueue.length) { playQueueExpectedId = ""; playQueueConfirmed = false; return }
     var track = playQueue[0]
     playQueueExpectedId = String(track.id)
+    playQueueConfirmed = false
+    playQueueLaunchedAt = Date.now()
     runAutoplayClick(track.link)
   }
 
   // Fires on every MPRIS track change, including the one where our own
   // click above lands (currentTrackId becomes playQueueExpectedId -- the
-  // "nothing to do" case below). It's only the *next* change after that --
+  // "nothing to do" case below). It's only a *later* change after that --
   // the queued track ending, on to Deezer's own algorithmic pick -- that
   // this needs to catch and override.
   onCurrentTrackIdChanged: {
     if (!playQueue.length) return
-    if (currentTrackId === playQueueExpectedId) return
-    if (String(playQueue[0].id) !== playQueueExpectedId) {
-      // The track we last queued was never actually confirmed playing (the
-      // click is still in flight, failed outright, or something unrelated
-      // took over in the meantime) -- don't guess, just stop trying to
-      // steer whatever's happening now.
+    if (currentTrackId === playQueueExpectedId) { playQueueConfirmed = true; return }
+    // MPRIS metadata briefly clears (xesam:url stops matching a /track/
+    // link, so currentTrackId reads "") while deezer-desktop is still
+    // mid-transition to the track we just asked for -- confirmed live as
+    // one reason a queued track got cut short early: that transient blank
+    // was being read as "it already ended, advance". It isn't a real
+    // track change; wait for the next one instead of treating a gap as
+    // evidence of anything.
+    if (currentTrackId === "") return
+    if (Date.now() - playQueueLaunchedAt < minTrackElapsedMs) {
+      // Too soon to be the track actually ending -- confirmed live:
+      // Deezer sometimes settles the id we asked for to a different
+      // canonical id for the very same song (duplicate catalog entries
+      // merged) well under a second after loading, which read exactly
+      // like "it ended, advance" before this guard existed and skipped an
+      // extra track ahead despite the requested one playing correctly.
+      // Adopt whatever id it actually settled on instead of assuming
+      // anything ended.
+      playQueueExpectedId = currentTrackId
+      playQueueConfirmed = true
+      return
+    }
+    if (!playQueueConfirmed) {
+      // Never actually confirmed this queue head loaded at all (the click
+      // is still in flight, failed outright, or something unrelated took
+      // over in the meantime) -- don't guess, just stop trying to steer
+      // whatever's happening now.
       clearQueue()
       return
     }
