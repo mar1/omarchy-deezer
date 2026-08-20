@@ -111,6 +111,34 @@ If your build of `deezer-desktop` doesn't carry the `--start-in-tray` patch, tha
 ignored on a cold launch and the window will flash briefly there instead -- everything else still
 works the same.
 
+### Continuing into the next track of a playlist/favorites/artist/album
+
+Clicking a specific track (not just "open this playlist") always plays that one track's own
+standalone page, the same click as any other item -- there's no click target in `deezer-desktop`
+for "play this row, keeping the surrounding list as the queue" that's actually reachable: an
+earlier version tried finding and clicking a track's own row *within* its playlist/loved-tracks
+page instead, which depended on that row being mounted in a virtualized, scroll-driven list --
+confirmed live to never work reliably, because `deezer-desktop` runs hidden (`--start-in-tray`,
+above) and Chromium suspends an occluded window's own layout/paint work, which row virtualization
+depends on to mount anything beyond whatever handful of rows were already there on load. No amount
+of scrolling, sorting, or an in-page title filter worked around that.
+
+`Service.qml` reimplements the continuation itself instead: `playFromQueue` keeps the caller's own
+already-fetched track list (from wherever the click came from -- a playlist, favorites, an
+artist's top tracks, an album), and `onCurrentTrackIdChanged` watches MPRIS for when the currently
+queued track ends and launches the *real* next one itself, rather than trusting whatever
+`deezer-desktop`'s own algorithmic "track mix" would have picked. Two things it has to filter out
+along the way, both confirmed live:
+
+- MPRIS metadata briefly reports an empty track id while `deezer-desktop` is still mid-transition
+  to a track that was just asked for -- read naively, that looks identical to "the track just
+  ended".
+- Deezer sometimes resolves the track id that was asked for to a different, canonical id for the
+  exact same song (duplicate catalog entries that have since been merged) well under a second
+  after loading -- also indistinguishable from "it ended" by id alone. A loose match against the
+  newly-loaded MPRIS title is what tells this apart from a genuinely different track loading that
+  fast (e.g. an unavailable/region-locked track silently falling back to something unrelated).
+
 This is still fundamentally automating around a gap in `deezer-desktop` (currently v7.1.300), not
 calling a supported integration point: a future update that renames those testids, or changes how
 its deep-link routing works, can break it silently. When that happens, opening an item falls back
