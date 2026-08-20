@@ -57,9 +57,14 @@ ROW_SEARCH_TIMEOUT_S = 25
 # any of them -- pkill/CDP-target-selection on that substring alone risks
 # hitting an unrelated Electron app that happens to be running at the same
 # time (killing it, or navigating/clicking inside *its* window instead of
-# deezer-desktop's). deezer-desktop's own executable name is distinctive
-# enough to require in addition to app.asar wherever either check happens.
-DEEZER_PROCESS_MARKER = "deezer-desktop"
+# deezer-desktop's). /usr/bin/deezer-desktop is a wrapper script that execs
+# `electron42 /usr/share/deezer/app.asar "$@"` -- confirmed live against a
+# running instance's own /proc/<pid>/cmdline -- so the process image is
+# just "electron"/"electron42" and the literal string "deezer-desktop"
+# never appears anywhere in its cmdline, on the main process or any of its
+# renderers. The one thing that *is* present on all of them is the asar's
+# own install path, so match on that instead.
+DEEZER_PROCESS_MARKER = "/deezer/app.asar"
 
 # The primary Play action's data-testid per content type, read straight off
 # a live DOM dump for each page kind rather than guessed. Each CSS attribute
@@ -290,34 +295,38 @@ def _is_deezer_target(target):
     # carry that substring incidentally (a tab titled "Deezer" in a browser,
     # a URL with "deezer" in a query string, etc.), which would still let
     # navigation/click/Runtime.evaluate run against a page that isn't
-    # deezer-desktop at all. Require the target's actual URL to be on the
-    # deezer.com origin -- not merely a URL/title that happens to mention
-    # "deezer". Before deezer-desktop's own first navigation its page target
-    # briefly sits at about:blank; that's deliberately treated as *not* a
-    # match here, so the polling loops in cdp_reachable/wait_for_page_target
-    # just keep waiting until the real navigation lands instead of trusting
-    # an unnavigated page prematurely.
+    # deezer-desktop at all.
+    #
+    # deezer-desktop's own page is *not* loaded from the deezer.com origin
+    # at all, confirmed live against a running instance's own CDP target
+    # list -- it's the bundled Electron frontend, loaded from local disk as
+    # file:///usr/share/deezer/app.asar/build/index.html, with client-side
+    # hash routing on top (the same #/... routing navigate_via_cdp drives).
+    # Requiring a deezer.com hostname, as this used to, never matched that
+    # real target at all -- it only ever matched an unrelated page that
+    # happened to actually be browsing deezer.com, which is not what this
+    # script drives. Match the asar's own install path instead, the same
+    # identity anchor _deezer_desktop_pids already keys off of in the
+    # process's cmdline. Before deezer-desktop's own first navigation its
+    # page target briefly sits at about:blank; that's deliberately treated
+    # as *not* a match here, so the polling loops in
+    # cdp_reachable/wait_for_page_target just keep waiting until the real
+    # navigation lands instead of trusting an unnavigated page prematurely.
     url = target.get("url") or ""
-    host = urllib.parse.urlparse(url).hostname or ""
-    return host == "deezer.com" or host.endswith(".deezer.com")
-
-
-def cdp_reachable():
-    try:
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{CDP_PORT}/json", timeout=1) as resp:
-            targets = json.loads(resp.read())
-        return any(_is_deezer_target(t) for t in targets)
-    except (urllib.error.URLError, ConnectionError, json.JSONDecodeError, OSError):
-        return False
+    parsed = urllib.parse.urlparse(url)
+    return (parsed.scheme == "file"
+            and DEEZER_PROCESS_MARKER in parsed.path
+            and parsed.path.endswith("/build/index.html"))
 
 
 def _deezer_desktop_pids():
     # pkill/pgrep -f "app.asar" alone would match *any* Electron app -- that
     # bundle filename is generic to Electron itself, not specific to
-    # deezer-desktop. Require deezer-desktop's own executable name in the
-    # full command line too, so an unrelated Electron/Chromium app that
-    # happens to be running never gets targeted.
+    # deezer-desktop. Require DEEZER_PROCESS_MARKER -- the asar's own
+    # install path, not deezer-desktop's executable name (see its
+    # definition above for why) -- in the full command line too, so an
+    # unrelated Electron/Chromium app that happens to be running never
+    # gets targeted.
     try:
         out = subprocess.run(["pgrep", "-f", "app.asar"],
                               capture_output=True, text=True)
@@ -334,6 +343,82 @@ def _deezer_desktop_pids():
         if DEEZER_PROCESS_MARKER.encode() in cmdline:
             pids.append(pid)
     return pids
+
+
+def _pid_listening_on_cdp_port():
+    # Resolve which pid actually holds CDP_PORT's listening socket, straight
+    # off the kernel's own tables -- not from anything the process itself
+    # could claim over CDP. /proc/net/tcp{,6} give every listening socket's
+    # local port and inode; matching that inode against each process's own
+    # /proc/<pid>/fd/* symlinks (which the kernel renders as
+    # "socket:[<inode>]") identifies the owning pid without shelling out to
+    # lsof/ss (neither is guaranteed installed).
+    port_hex = f"{CDP_PORT:04X}"
+    inodes = set()
+    for proc_file in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(proc_file) as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10:
+                continue
+            local_port = fields[1].split(":")[-1]
+            tcp_listen = "0A"
+            if local_port == port_hex and fields[3] == tcp_listen:
+                inodes.add(fields[9])
+    if not inodes:
+        return None
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return None
+    for entry in proc_entries:
+        if not entry.isdigit():
+            continue
+        fd_dir = f"/proc/{entry}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue  # not our process, or it already exited
+        for fd in fds:
+            try:
+                link = os.readlink(f"{fd_dir}/{fd}")
+            except OSError:
+                continue
+            m = re.match(r"socket:\[(\d+)\]", link)
+            if m and m.group(1) in inodes:
+                return int(entry)
+    return None
+
+
+def _cdp_port_owned_by_deezer_desktop():
+    # _is_deezer_target only proves a given CDP *target* is a deezer.com
+    # page -- it says nothing about which process is actually serving CDP
+    # on this port. Some other debug-enabled Chromium/Electron instance
+    # that merely happens to have a deezer.com tab open (or is deliberately
+    # squatting on the port) would pass that check identically and still
+    # receive navigation/click/Runtime.evaluate commands. Cross-check the
+    # port's real owning pid against deezer-desktop's own process list --
+    # the same identity check already trusted for the kill path -- so a
+    # same-origin page served by anything else is rejected regardless of
+    # its URL.
+    pid = _pid_listening_on_cdp_port()
+    return pid is not None and pid in _deezer_desktop_pids()
+
+
+def cdp_reachable():
+    if not _cdp_port_owned_by_deezer_desktop():
+        return False
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{CDP_PORT}/json", timeout=1) as resp:
+            targets = json.loads(resp.read())
+        return any(_is_deezer_target(t) for t in targets)
+    except (urllib.error.URLError, ConnectionError, json.JSONDecodeError, OSError):
+        return False
 
 
 def relaunch_cold(url):
@@ -386,6 +471,8 @@ def wait_for_page_target():
     deadline = time.monotonic() + CDP_STARTUP_TIMEOUT_S
     while time.monotonic() < deadline:
         try:
+            if not _cdp_port_owned_by_deezer_desktop():
+                raise ConnectionError("CDP port not (yet) owned by deezer-desktop")
             with urllib.request.urlopen(
                     f"http://127.0.0.1:{CDP_PORT}/json", timeout=1) as resp:
                 targets = json.loads(resp.read())
