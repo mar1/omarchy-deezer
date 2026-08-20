@@ -14,6 +14,11 @@ BorderSurface {
   property color accent: Color.accent
   property string fontFamily: Style.font.family
   property bool selected: false
+  // "This is the track currently loaded in the player" / "and it's actively
+  // playing (vs. paused on it)" -- kept separate so a paused track still
+  // reads as highlighted, just without the play glyph animating.
+  property bool nowPlaying: false
+  property bool isPlaying: false
   property bool showFavorite: false
   property bool favorited: false
   property bool hovered: hoverHandler.hovered
@@ -30,9 +35,9 @@ BorderSurface {
   implicitHeight: Style.space(60)
   height: implicitHeight
   radius: Style.cornerRadius
-  color: selected ? Style.selectedFillFor(foreground, accent)
+  color: (selected || nowPlaying) ? Style.selectedFillFor(foreground, accent)
     : (hovered ? Style.hoverFillFor(foreground, accent) : "transparent")
-  borderSpec: selected ? Border.controlSpec("selected", foreground, accent) : Border.none()
+  borderSpec: (selected || nowPlaying) ? Border.controlSpec("selected", foreground, accent) : Border.none()
   clip: true
 
   HoverHandler { id: hoverHandler }
@@ -92,10 +97,10 @@ BorderSurface {
       Text {
         width: parent.width
         text: root.itemData ? String(root.itemData.name || "Untitled") : "Untitled"
-        color: root.foreground
+        color: root.nowPlaying ? root.accent : root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
-        font.bold: root.selected
+        font.bold: root.selected || root.nowPlaying
         elide: Text.ElideRight
       }
 
@@ -117,7 +122,16 @@ BorderSurface {
       spacing: Style.space(2)
 
       Text {
-        visible: root.itemData && root.itemData.durationMs > 0
+        visible: root.nowPlaying
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.isPlaying ? "󰐊" : "󰏤"
+        color: root.accent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      Text {
+        visible: !root.nowPlaying && root.itemData && root.itemData.durationMs > 0
         anchors.verticalCenter: parent.verticalCenter
         text: Api.millisecondsToClock(root.itemData ? root.itemData.durationMs : 0)
         color: Qt.darker(root.foreground, 1.45)

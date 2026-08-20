@@ -158,6 +158,13 @@ Item {
   // refs instead of guessing from a name search.
   readonly property string currentTrackUrl: hasPlayer && deezerPlayer.metadata
     ? String(deezerPlayer.metadata["xesam:url"] || "") : ""
+  // Same id, pulled out once for UI code that just wants to know "is this
+  // the track that's loaded right now?" (e.g. highlighting it in a list)
+  // without duplicating the regex everywhere.
+  readonly property string currentTrackId: {
+    var match = currentTrackUrl.match(/\/track\/(\d+)/)
+    return match ? match[1] : ""
+  }
   property var currentTrackArtist: null
   property var currentTrackAlbum: null
 
