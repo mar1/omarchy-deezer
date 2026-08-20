@@ -80,6 +80,9 @@ Item {
         fontFamily: Style.font.family
         showFavorite: root.showFavorite
         favorited: root.service ? root.service.isFavorite(modelData) : false
+        nowPlaying: root.service && modelData && modelData.type === "track"
+          && modelData.id !== "" && modelData.id === root.service.currentTrackId
+        isPlaying: root.service ? root.service.playing : false
         onActivated: function(item) { root.activated(item) }
         onArtistRequested: function(item) { root.artistRequested(item) }
         onAlbumRequested: function(item) { root.albumRequested(item) }
