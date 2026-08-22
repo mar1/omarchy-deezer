@@ -183,10 +183,20 @@ def _deezer_desktop_pids():
     # path, not deezer-desktop's executable name (see its definition above
     # for why) -- as one whole argument in the command line too, so an
     # unrelated Electron/Chromium app that happens to be running never gets
-    # targeted. Checked as a whole null-separated arg rather than a
-    # substring of the raw cmdline bytes: a substring check would equally
-    # match a lookalike path that merely contains the same run of
-    # characters somewhere without actually being this install.
+    # targeted, and checked for exact equality against an argument rather
+    # than substring containment in the raw cmdline bytes: a substring
+    # check would equally match a lookalike path that merely contains the
+    # same run of characters somewhere without actually being this
+    # install.
+    #
+    # /proc/<pid>/cmdline is supposed to be one NUL-separated argument per
+    # element, but Chromium/Electron processes rewrite their own argv
+    # memory in place for their process-title display -- confirmed live
+    # against a running deezer-desktop, this can collapse the whole
+    # thing into a single element with the original arguments joined by
+    # plain spaces instead of NULs. Splitting each NUL-separated element on
+    # whitespace too, before comparing, tolerates that rewrite while still
+    # requiring an exact token match rather than a raw substring.
     try:
         out = subprocess.run(["pgrep", "-f", "app.asar"],
                               capture_output=True, text=True)
@@ -200,7 +210,7 @@ def _deezer_desktop_pids():
                 cmdline = f.read()
         except (ValueError, OSError):
             continue
-        args = cmdline.decode(errors="replace").split("\0")
+        args = cmdline.decode(errors="replace").replace("\0", " ").split()
         if DEEZER_ASAR_PATH in args:
             pids.append(pid)
     return pids
