@@ -139,6 +139,17 @@ along the way, both confirmed live:
   newly-loaded MPRIS title is what tells this apart from a genuinely different track loading that
   fast (e.g. an unavailable/region-locked track silently falling back to something unrelated).
 
+Waiting for MPRIS to report the queued track actually ending before reacting had its own audible
+cost: `deezer-desktop` fills that gap with its own "track mix" pick the instant the track ends,
+and the click that overrides it (`scripts/autoplay-click.py`, warm path) takes roughly a second to
+land, so that pick got to play for about that long on every single transition. `schedulePreemptiveAdvance`
+avoids this by not waiting for the natural end at all -- once a queued track is confirmed playing,
+it reads MPRIS's own reported length and schedules the *next* click for `preemptiveAdvanceLeadMs`
+(1s) before that track's predicted end, so the override's own latency is absorbed inside the
+current track's tail instead of showing up as a gap after it. The reactive
+`onCurrentTrackIdChanged` handling above remains as a fallback for whenever MPRIS doesn't report a
+usable length to schedule against.
+
 This is still fundamentally automating around a gap in `deezer-desktop` (currently v7.1.300), not
 calling a supported integration point: a future update that renames those testids, or changes how
 its deep-link routing works, can break it silently. When that happens, opening an item falls back

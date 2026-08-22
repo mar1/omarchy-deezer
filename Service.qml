@@ -201,6 +201,11 @@ Item {
     if (!hasPlayer || !deezerPlayer.canSeek || !deezerPlayer.positionSupported) return
     var maximum = lengthSeconds > 0 ? lengthSeconds : Number.MAX_VALUE
     deezerPlayer.position = Math.max(0, Math.min(maximum, Number(value) || 0))
+    // A manual seek moves positionSeconds out from under whatever estimate
+    // schedulePreemptiveAdvance() last used -- redo it against the new
+    // position so a seek backward doesn't cut the track short early and a
+    // seek forward doesn't leave the mix pick a window to sneak in again.
+    if (playQueue.length && playQueueConfirmed) schedulePreemptiveAdvance()
   }
   function setVolume(value) {
     if (!volumeSupported) return
@@ -270,6 +275,18 @@ Item {
   // below), not the track ending.
   readonly property int minTrackElapsedMs: 3000
 
+  // How long the warm path of scripts/autoplay-click.py takes to land a
+  // click, roughly (its own sleeps alone add up to ~1s -- see its
+  // docstring). Waiting for MPRIS to report the queued track actually
+  // ending before starting that meant deezer-desktop's own algorithmic
+  // "track mix" pick got to play audibly for about that long every time,
+  // since it always fills the gap the instant the real track ends and we
+  // don't override it until the click above finally lands. Firing the next
+  // click this long *before* the natural end instead means our own click's
+  // latency is absorbed inside the current track's own tail, so the mix
+  // pick never gets a chance to start.
+  readonly property int preemptiveAdvanceLeadMs: 1000
+
   // Loose title match (case/whitespace-insensitive) used to tell a same-
   // song catalog-id redirect apart from a genuinely different track
   // loading this fast -- e.g. an unavailable/region-locked track falling
@@ -285,6 +302,7 @@ Item {
     playQueue = []
     playQueueExpectedId = ""
     playQueueConfirmed = false
+    preemptiveAdvanceTimer.stop()
   }
 
   function playFromQueue(tracks, startIndex) {
@@ -294,12 +312,44 @@ Item {
   }
 
   function advanceQueue() {
+    preemptiveAdvanceTimer.stop()
     if (!playQueue.length) { playQueueExpectedId = ""; playQueueConfirmed = false; return }
     var track = playQueue[0]
     playQueueExpectedId = String(track.id)
     playQueueConfirmed = false
     playQueueLaunchedAt = Date.now()
     runAutoplayClick(track.link)
+  }
+
+  // Drops the confirmed head of the queue and moves on to the next one --
+  // shared by the reactive "MPRIS says it already changed" path below and
+  // the proactive timer that preempts it.
+  function advanceToNextQueuedTrack() {
+    playQueue.shift()
+    advanceQueue()
+  }
+
+  // Schedules advanceToNextQueuedTrack() to fire preemptiveAdvanceLeadMs
+  // before the just-confirmed track's own natural end, so our own click
+  // lands before deezer-desktop's "track mix" ever gets a gap to fill.
+  // Only possible when MPRIS actually gives a usable length -- when it
+  // doesn't, this silently does nothing more and onCurrentTrackIdChanged's
+  // reactive handling below remains the only path, same as before this
+  // existed.
+  function schedulePreemptiveAdvance() {
+    preemptiveAdvanceTimer.stop()
+    if (!playQueue.length || !hasPlayer || !deezerPlayer.lengthSupported
+        || !deezerPlayer.positionSupported) return
+    var remainingMs = (lengthSeconds - positionSeconds) * 1000 - preemptiveAdvanceLeadMs
+    if (remainingMs <= 0) return
+    preemptiveAdvanceTimer.interval = remainingMs
+    preemptiveAdvanceTimer.start()
+  }
+
+  Timer {
+    id: preemptiveAdvanceTimer
+    repeat: false
+    onTriggered: root.advanceToNextQueuedTrack()
   }
 
   // Fires on every MPRIS track change, including the one where our own
@@ -309,7 +359,11 @@ Item {
   // this needs to catch and override.
   onCurrentTrackIdChanged: {
     if (!playQueue.length) return
-    if (currentTrackId === playQueueExpectedId) { playQueueConfirmed = true; return }
+    if (currentTrackId === playQueueExpectedId) {
+      playQueueConfirmed = true
+      schedulePreemptiveAdvance()
+      return
+    }
     // MPRIS metadata briefly clears (xesam:url stops matching a /track/
     // link, so currentTrackId reads "") while deezer-desktop is still
     // mid-transition to the track we just asked for -- confirmed live as
@@ -334,6 +388,7 @@ Item {
       // falls through to the "never confirmed" branch below instead.
       playQueueExpectedId = currentTrackId
       playQueueConfirmed = true
+      schedulePreemptiveAdvance()
       return
     }
     if (!playQueueConfirmed) {
@@ -344,8 +399,11 @@ Item {
       clearQueue()
       return
     }
-    playQueue.shift()
-    advanceQueue()
+    // The preemptive timer above should normally beat this -- reaching here
+    // means MPRIS reported the change before that timer fired (no usable
+    // length, or the click landed later than preemptiveAdvanceLeadMs
+    // predicted). Same continuation either way.
+    advanceToNextQueuedTrack()
   }
 
   // Looked up by id rather than plain Array.indexOf(track) -- the clicked
