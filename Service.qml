@@ -131,10 +131,43 @@ Item {
   readonly property string album: hasPlayer ? String(deezerPlayer.trackAlbum || "") : ""
   readonly property string artUrl: hasPlayer ? String(deezerPlayer.trackArtUrl || "") : ""
   property int playbackPositionTick: 0
+  // MPRIS doesn't push Position at all -- it's poll-only (see
+  // refreshPosition and the 1s Timer that drives it from the UI), and
+  // deezer-desktop's own backend doesn't reset it to ~0 for a just-started
+  // track the instant currentTrackId itself changes -- confirmed live
+  // (raw MPRIS Position dumped straight off D-Bus around a real track
+  // switch): it kept reporting the *previous* track's own real position
+  // for up to roughly a second after the switch, not a merely-stale cached
+  // read but the backend's own genuinely-still-old value. A first attempt
+  // at covering that gap by counting up locally on our own wall clock
+  // turned out worse in practice -- isPlaying flickers false for a beat
+  // during the same transition, and elapsed wall-clock time kept accruing
+  // underneath that pause anyway, so control handed back to the real
+  // value with a sudden jump instead of a smooth count. Simply pinning
+  // the display at 0 and *not* advancing it ourselves avoids that failure
+  // mode entirely -- worst case it briefly under-reports by sitting at 0
+  // a little longer than strictly necessary, never jumps or skips.
+  // positionOverrideTimer hands control back once the backend's had long
+  // enough to settle.
+  property real positionOverrideSeconds: -1
+  readonly property int positionOverrideWindowMs: 2500
   readonly property real positionSeconds: {
     playbackPositionTick
+    if (positionOverrideSeconds >= 0) return positionOverrideSeconds
     return hasPlayer && deezerPlayer.positionSupported
       ? Math.max(0, Number(deezerPlayer.position) || 0) : 0
+  }
+
+  function startPositionOverride() {
+    positionOverrideSeconds = 0
+    positionOverrideTimer.restart()
+  }
+
+  Timer {
+    id: positionOverrideTimer
+    interval: root.positionOverrideWindowMs
+    repeat: false
+    onTriggered: root.positionOverrideSeconds = -1
   }
   readonly property real lengthSeconds: hasPlayer && deezerPlayer.lengthSupported
     ? Math.max(0, Number(deezerPlayer.length) || 0) : 0
@@ -358,6 +391,11 @@ Item {
   // the queued track ending, on to Deezer's own algorithmic pick -- that
   // this needs to catch and override.
   onCurrentTrackIdChanged: {
+    // See positionOverrideSeconds/startPositionOverride above: pin the
+    // elapsed-time display at 0 for a bit on any track change, real or
+    // queue-driven, rather than showing whatever stale figure the backend
+    // hasn't caught up to replacing yet.
+    startPositionOverride()
     if (!playQueue.length) return
     if (currentTrackId === playQueueExpectedId) {
       playQueueConfirmed = true
