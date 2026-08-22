@@ -78,8 +78,12 @@ CLICK_RETRY_TIMEOUT_S = 8
 # just "electron"/"electron42" and the literal string "deezer-desktop"
 # never appears anywhere in its cmdline, on the main process or any of its
 # renderers. The one thing that *is* present on all of them is the asar's
-# own install path, so match on that instead.
-DEEZER_PROCESS_MARKER = "/deezer/app.asar"
+# own install path, so match on that instead -- as a full path, not a
+# substring: a prior version checked "/deezer/app.asar in <path>", which a
+# lookalike path containing that same run of characters anywhere (e.g. a
+# malicious app installed to a directory literally named "deezer") would
+# still satisfy despite not being the real package install location at all.
+DEEZER_ASAR_PATH = "/usr/share/deezer/app.asar"
 
 # The primary Play action's data-testid per content type, read straight off
 # a live DOM dump for each page kind rather than guessed. Each CSS attribute
@@ -158,26 +162,31 @@ def _is_deezer_target(target):
     # happened to actually be browsing deezer.com, which is not what this
     # script drives. Match the asar's own install path instead, the same
     # identity anchor _deezer_desktop_pids already keys off of in the
-    # process's cmdline. Before deezer-desktop's own first navigation its
-    # page target briefly sits at about:blank; that's deliberately treated
-    # as *not* a match here, so the polling loops in
-    # cdp_reachable/wait_for_page_target just keep waiting until the real
-    # navigation lands instead of trusting an unnavigated page prematurely.
+    # process's cmdline -- as an exact path, not a substring anywhere in a
+    # longer one (a lookalike install path containing the same run of
+    # characters would otherwise pass identically). Before deezer-desktop's
+    # own first navigation its page target briefly sits at about:blank;
+    # that's deliberately treated as *not* a match here, so the polling
+    # loops in cdp_reachable/wait_for_page_target just keep waiting until
+    # the real navigation lands instead of trusting an unnavigated page
+    # prematurely.
     url = target.get("url") or ""
     parsed = urllib.parse.urlparse(url)
     return (parsed.scheme == "file"
-            and DEEZER_PROCESS_MARKER in parsed.path
-            and parsed.path.endswith("/build/index.html"))
+            and parsed.path == DEEZER_ASAR_PATH + "/build/index.html")
 
 
 def _deezer_desktop_pids():
     # pkill/pgrep -f "app.asar" alone would match *any* Electron app -- that
     # bundle filename is generic to Electron itself, not specific to
-    # deezer-desktop. Require DEEZER_PROCESS_MARKER -- the asar's own
-    # install path, not deezer-desktop's executable name (see its
-    # definition above for why) -- in the full command line too, so an
-    # unrelated Electron/Chromium app that happens to be running never
-    # gets targeted.
+    # deezer-desktop. Require DEEZER_ASAR_PATH -- the asar's own install
+    # path, not deezer-desktop's executable name (see its definition above
+    # for why) -- as one whole argument in the command line too, so an
+    # unrelated Electron/Chromium app that happens to be running never gets
+    # targeted. Checked as a whole null-separated arg rather than a
+    # substring of the raw cmdline bytes: a substring check would equally
+    # match a lookalike path that merely contains the same run of
+    # characters somewhere without actually being this install.
     try:
         out = subprocess.run(["pgrep", "-f", "app.asar"],
                               capture_output=True, text=True)
@@ -191,7 +200,8 @@ def _deezer_desktop_pids():
                 cmdline = f.read()
         except (ValueError, OSError):
             continue
-        if DEEZER_PROCESS_MARKER.encode() in cmdline:
+        args = cmdline.decode(errors="replace").split("\0")
+        if DEEZER_ASAR_PATH in args:
             pids.append(pid)
     return pids
 
