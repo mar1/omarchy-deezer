@@ -385,6 +385,19 @@ Item {
     onTriggered: root.advanceToNextQueuedTrack()
   }
 
+  // preemptiveAdvanceTimer counts down real wall-clock time from wherever
+  // schedulePreemptiveAdvance() last set it -- it has no idea the track
+  // itself stopped moving. Left alone, pausing for longer than the
+  // remaining lead time made it fire anyway and skip straight to the next
+  // queued track despite the current one never having reached its end.
+  // Stop it the instant playback pauses, and recompute a fresh countdown
+  // from the actual position once it resumes.
+  onPlayingChanged: {
+    if (!playQueue.length || !playQueueConfirmed) return
+    if (playing) schedulePreemptiveAdvance()
+    else preemptiveAdvanceTimer.stop()
+  }
+
   // Fires on every MPRIS track change, including the one where our own
   // click above lands (currentTrackId becomes playQueueExpectedId -- the
   // "nothing to do" case below). It's only a *later* change after that --
