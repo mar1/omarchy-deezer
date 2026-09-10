@@ -480,6 +480,16 @@ Item {
     playFromQueue(albumTracks, indexOfTrackId(albumTracks, track))
   }
 
+  // Set when the most recent autoplay click found deezer-desktop's own
+  // session (independent of this plugin's own OAuth login above -- see
+  // scripts/autoplay-click.py's docstring) already expired -- every future
+  // click will keep landing on that app's login screen instead of a Play
+  // button until a human signs back in through its own window. Surfaced in
+  // Panel.qml as a banner with a "Reconnect" button, since there is nothing
+  // this plugin can do to clear it on its own.
+  property bool desktopSignedOut: false
+  property bool desktopReconnecting: false
+
   function runAutoplayClick(link) {
     var url = link.indexOf("https://") === 0
       ? "deezer://" + link.slice("https://".length)
@@ -493,10 +503,34 @@ Item {
     autoplayClickProcess.running = true
   }
 
+  // Kills and relaunches deezer-desktop *without* --start-in-tray so a
+  // signed-out session gets a real, visible window to sign back in through
+  // -- see scripts/reopen-deezer-desktop.py. desktopSignedOut is left set
+  // until a subsequent click actually lands (exit 0 below): the banner
+  // disappearing the instant this button is clicked, before sign-in has
+  // even happened, would be misleading.
+  function reconnectDesktopApp() {
+    if (desktopReconnecting) return
+    desktopReconnecting = true
+    reopenDesktopProcess.command = ["python3", pluginDir + "/scripts/reopen-deezer-desktop.py"]
+    reopenDesktopProcess.running = true
+  }
+
+  Process {
+    id: reopenDesktopProcess
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) { root.desktopReconnecting = false }
+  }
+
   Process {
     id: autoplayClickProcess
     stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 3) root.desktopSignedOut = true
+      else if (exitCode === 0) root.desktopSignedOut = false
+    }
   }
 
   // --- Auth + catalog ----------------------------------------------------
