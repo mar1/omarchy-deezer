@@ -235,6 +235,37 @@ Item {
             }
           }
 
+          // deezer-desktop's own session (separate from this plugin's own
+          // sign-in above -- see Service.qml's desktopSignedOut) has
+          // expired: every click on a track is landing on that app's
+          // login screen instead of actually playing anything, silently,
+          // until a human notices and signs back in. Shown regardless of
+          // which tab is open since it affects playback from all of them.
+          Row {
+            width: parent.width
+            visible: root.service && root.service.desktopSignedOut
+            spacing: Style.space(10)
+
+            Text {
+              width: parent.width - reconnectButton.width - parent.spacing
+              anchors.verticalCenter: parent.verticalCenter
+              wrapMode: Text.WordWrap
+              text: "Your Deezer app session expired, so tracks won't play. Sign back in to fix it."
+              color: Color.urgent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Button {
+              id: reconnectButton
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.service && root.service.desktopReconnecting ? "Reopening…" : "Reconnect"
+              foreground: root.foreground
+              enabled: root.service && !root.service.desktopReconnecting
+              onClicked: if (root.service) root.service.reconnectDesktopApp()
+            }
+          }
+
           PanelSeparator { foreground: root.foreground }
 
           // Player tab. The content itself is a Column (playerColumn) sized

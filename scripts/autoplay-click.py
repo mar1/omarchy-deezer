@@ -46,8 +46,13 @@ another call to this script, rather than depending on deezer-desktop's own
 in-app queue at all.
 
 Usage: autoplay-click.py <deezer://...-or-https://... url>
-Exit 0 if the click landed, 1 otherwise. Always best-effort -- callers
-should not treat a nonzero exit as more than "didn't work this time".
+Exit 0 if the click landed, 1 for any other best-effort failure (callers
+should not treat that as more than "didn't work this time"), 3 specifically
+when deezer-desktop's own session has expired -- distinct from 1 because
+that one *is* actionable: the target page never had a Play button to click
+because the app redirected to its own login screen instead, and it'll keep
+doing that on every future click until a human signs back in through that
+app's own (normally hidden, --start-in-tray) window.
 """
 import base64
 import hashlib
@@ -97,37 +102,62 @@ PLAY_BUTTON_SELECTOR = ",".join([
 ])
 
 
-def _play_button_probe(expected_path, click):
-    # The click can land before the SPA has actually finished routing to the
-    # requested item -- verified live: an early click just hit whatever
-    # Play control was already on screen (the persisted, already loaded
-    # track's own mini-player button) and left the target track never
-    # loaded. Requiring the location hash to already match the deep link's
-    # own path (e.g. "/track/12345") before considering a click closes
-    # that gap.
-    #
-    # Even once the hash and the button both check out, the button's own
-    # click handler can still be a beat behind (React hydration) -- clicking
-    # the very instant it's found landed on a not-yet-wired element in
-    # testing. `click=False` lets the caller confirm readiness on a couple
-    # of consecutive polls (letting hydration catch up) before a `click=True`
-    # call actually presses it for real.
+# Matches deezer-desktop's own router landing on its login screen, however
+# it got there -- a fresh cold launch redirecting a now-stale deep link
+# straight to login, or a warm instance whose session expired mid-session
+# and got bounced there on the next navigate. Seen live both with and
+# without a leading locale segment ("#/login" and "#/fr/login"), so neither
+# is assumed. No backslash-escaping of the "/"s needed here despite this
+# being embedded in JS below -- it's handed to the RegExp *constructor* as a
+# plain string, not written as a /.../ regex literal, and "/" isn't special
+# to the pattern language itself.
+SIGNED_OUT_HASH_RE = r"^#/(?:[^/]+/)?login(?:[/?]|$)"
+
+
+def _page_status_probe(expected_path):
+    # Three-way status rather than a plain ready boolean, specifically so a
+    # session that's expired can be told apart from one that just hasn't
+    # finished routing yet -- both look identical to the old boolean probe
+    # (no matching Play button on screen), but only the second is worth
+    # continuing to poll for; the first will never resolve on its own no
+    # matter how long try_click keeps retrying.
     path_pattern = json.dumps(re.escape(expected_path))
-    action = "el.click(); return true;" if click else "return true;"
+    return f"""
+    (function() {{
+      if (new RegExp({json.dumps(SIGNED_OUT_HASH_RE)}).test(location.hash))
+        return "signed_out";
+      if (!new RegExp({path_pattern}).test(location.hash)) return "not_ready";
+      var el = document.querySelector({json.dumps(PLAY_BUTTON_SELECTOR)});
+      if (!el) return "not_ready";
+      // /playlist and /album's "play" testid lands on a wrapping <div>, not
+      // the actual <button> inside it -- a native click() on that div never
+      // reaches the button's own listener (clicks don't propagate to
+      // descendants), so require a descendant button to already be there too.
+      if (el.tagName !== "BUTTON" && !el.querySelector("button")) return "not_ready";
+      return "ready";
+    }})()
+    """
+
+
+def _click_probe(expected_path):
+    # Only ever called once _page_status_probe has already reported "ready"
+    # on a couple of consecutive polls -- see try_click. That gap (rather
+    # than clicking the instant readiness is first seen) absorbs the button's
+    # own click handler still being a beat behind on attach (React
+    # hydration) -- clicking the very instant it's found landed on a
+    # not-yet-wired element in testing.
+    path_pattern = json.dumps(re.escape(expected_path))
     return f"""
     (function() {{
       if (!new RegExp({path_pattern}).test(location.hash)) return false;
       var el = document.querySelector({json.dumps(PLAY_BUTTON_SELECTOR)});
       if (!el) return false;
-      // /playlist and /album's "play" testid lands on a wrapping <div>, not
-      // the actual <button> inside it -- a native click() on that div never
-      // reaches the button's own listener (clicks don't propagate to
-      // descendants), so descend into it when the match isn't already one.
       if (el.tagName !== "BUTTON") {{
         el = el.querySelector("button");
         if (!el) return false;
       }}
-      {action}
+      el.click();
+      return true;
     }})()
     """
 
@@ -453,24 +483,31 @@ def evaluate(sock, msg_id, expression, timeout=2):
 
 
 def try_click(sock, expected_path):
-    ready_expr = _play_button_probe(expected_path, click=False)
-    click_expr = _play_button_probe(expected_path, click=True)
+    """Returns "clicked", "signed_out", or "timeout"."""
+    status_expr = _page_status_probe(expected_path)
+    click_expr = _click_probe(expected_path)
     deadline = time.monotonic() + CLICK_RETRY_TIMEOUT_S
     msg_id = 0
     consecutive_ready = 0
     while time.monotonic() < deadline:
         msg_id += 1
-        if evaluate(sock, msg_id, ready_expr) is True:
+        status = evaluate(sock, msg_id, status_expr)
+        if status == "signed_out":
+            # Won't resolve itself no matter how long this keeps polling --
+            # bail out immediately rather than burning the full retry
+            # window on a page that's never going to grow a Play button.
+            return "signed_out"
+        if status == "ready":
             consecutive_ready += 1
             if consecutive_ready >= 2:
                 msg_id += 1
                 if evaluate(sock, msg_id, click_expr) is True:
-                    return True
+                    return "clicked"
                 consecutive_ready = 0
         else:
             consecutive_ready = 0
         time.sleep(0.3)
-    return False
+    return "timeout"
 
 
 def main():
@@ -489,9 +526,15 @@ def main():
     try:
         if warm:
             navigate_via_cdp(sock, expected_path)
-        return 0 if try_click(sock, expected_path) else 1
+        result = try_click(sock, expected_path)
     finally:
         sock.close()
+    if result == "clicked":
+        return 0
+    if result == "signed_out":
+        print("signed_out", file=sys.stdout)
+        return 3
+    return 1
 
 
 if __name__ == "__main__":
